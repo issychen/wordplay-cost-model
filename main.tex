@@ -4,6 +4,7 @@
 \usepackage{booktabs}
 
 \newcommand{\pos}[1]{\left(#1\right)^{+}}
+\setlength{\emergencystretch}{3em}
 
 \title{Wordplay Cost Formulas}
 \author{}
@@ -90,7 +91,7 @@ $c$ & Function calls in a month** \\
 $e$ & Function outbound data in GB per month \\
 $b$ & Hosting downloads in GB per day \\
 $h$ & Hosting storage in GB \\
-**Indicates user behaviour
+\multicolumn{2}{l}{**Indicates user behaviour} \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -161,5 +162,226 @@ users. Those rates were not checked.
 \section{Fixed Costs}
 \subsection{Cap Costs}
 Many aspects within Wordplay operate within the free tier, fixed costs above the free tier is as follows. 
+
+\subsection{What counts as fixed}
+
+These are paid whether or not anyone uses the app. Most scale with the number
+of Firebase projects (\texttt{wordplay-prod} and \texttt{wordplay-dev}) or with
+the total size of the database, not with activity. Claude has no fixed fee.
+
+\subsection{Variables}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Symbol & Meaning \\
+\midrule
+$P$ & Firebase projects with the functions deployed \\
+$J$ & Scheduled jobs on the billing account \\
+$j$ & Scheduled jobs per project ($j = 8$) \\
+$s$ & Active secret versions on the billing account \\
+$a$ & Secret accesses in a month \\
+$G$ & Firestore database size in GiB \\
+$B_d$ & Daily backups kept ($B_d = 7$ in prod) \\
+$B_w$ & Weekly backups kept ($B_w = 14$ in prod) \\
+$G_r$ & Function container images stored, in GiB \\
+$m$ & Cloud Build minutes in a day \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Scheduled jobs (Cloud Scheduler)}
+
+Each job costs \$0.10 per 31 days. The first 3 jobs on the billing account are
+free, and executions are not billed.
+
+\[
+J = j\,P, \qquad
+C_{\text{scheduler}} = 0.10\,\pos{J - 3} \quad \text{per month}
+\]
+
+With $j = 8$ and $P = 2$: $C_{\text{scheduler}} = 0.10 \times 13 = \$1.30$.
+
+Running the jobs costs about 1{,}000 function calls per project each month
+(mostly the hourly \texttt{compactProjectUpdates} and the 4-hourly chat
+digest), well inside the free 2 million.
+
+\subsection{Secrets (Secret Manager)}
+
+\[
+C_{\text{secrets}} = 0.06\,\pos{s - 6}
+                   + \frac{0.03\,\pos{a - 10000}}{10^{4}}
+                   \quad \text{per month}
+\]
+
+Three secrets in two projects is $s = 6$, which is free. A secret is read when
+a function instance starts, so $a$ grows with cold starts.
+
+\subsection{Backups and point-in-time recovery (prod only)}
+
+Assuming each backup is the size of the database:
+
+\[
+C_{\text{backups}} = 0.03\,(B_d + B_w)\,G = 0.63\,G
+\qquad
+C_{\text{PITR}} = 0.15\,G
+\quad \text{per month}
+\]
+
+Protecting the data costs about five times what storing it does. Ignoring the
+free 1\,GiB, the total for data is:
+
+\[
+C_{\text{data}} \approx 0.15\,G + 0.63\,G + 0.15\,G = 0.93\,G
+\quad \text{per month}
+\]
+
+These have no free tier and grow with total data kept, not with activity.
+
+\subsection{Deploys}
+
+Every push to \texttt{main} redeploys hosting, rules and every function.
+
+\begin{align*}
+C_{\text{build}} &= 0.003\,\pos{m - 120} && \text{per day} \\
+C_{\text{registry}} &= 0.10\,\pos{G_r - 0.5} && \text{per month}
+\end{align*}
+
+$G_r$ depends on whether old images are cleaned up, which is set in Artifact
+Registry rather than in the repository. Hosting files are about 223\,MB per
+release, inside the free 10\,GB unless many old releases are kept.
+
+\subsection{Outside Google Cloud}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Item & Cost \\
+\midrule
+Resend plan & Not checked; free tier or a monthly plan \\
+\texttt{wordplay.dev} domain & Yearly, from the registrar \\
+GitHub & Free \\
+Anthropic & No fixed fee; pay per token only \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Total fixed cost}
+
+\[
+C_{\text{fixed}} =
+C_{\text{scheduler}} + C_{\text{secrets}} + C_{\text{backups}}
++ C_{\text{PITR}} + C_{\text{registry}} + \sum_{\text{days}} C_{\text{build}}
++ C_{\text{Resend}} + C_{\text{domain}}
+\]
+
+For a database of a few GiB this is a few dollars a month, plus Resend and the
+domain.
+
+\section{Other costs}
+
+\subsection{Variables}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Symbol & Meaning \\
+\midrule
+$A$ & reCAPTCHA assessments in a month, across the organization \\
+$d$ & Active devices that call a Cloud Function in a month \\
+$e_w$ & Outbound GB from \texttt{getWebpage} in a month \\
+$L$ & New languages translated in a month \\
+$G_{\text{restore}}$ & GiB restored from a backup \\
+$r_m$ & Documents read by a migration \\
+$w_m$ & Documents written by a migration \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{App Check (reCAPTCHA)}
+
+A token lasts 7 days and is only requested when a Cloud Function is called,
+so each active device makes about one assessment a week:
+
+\[
+A \approx 4.3\,d
+\]
+
+\[
+C_{\text{App Check}} =
+\begin{cases}
+0 & A \le 10000 \\
+8 & 10000 < A \le 100000 \\
+8 + \dfrac{A - 100000}{1000} & A > 100000
+\end{cases}
+\quad \text{per month}
+\]
+
+The pricing page lists \$1 per 1{,}000 above 100{,}000 assessments without
+saying whether the \$8 fee still applies; this formula assumes it does.
+
+\subsection{\texttt{getWebpage}}
+
+The function fetches any URL with no sign-in, App Check or size limit, so its
+cost is set by whoever calls it. Its outbound data shares the function
+allowance of 5\,GB, so once that is used each extra GB costs:
+
+\[
+C_{\text{getWebpage}} \approx 0.12\,e_w
+\quad \text{per month, plus running time}
+\]
+
+\subsection{Development use of Claude}
+
+These use the project's Anthropic key from developers' machines and GitHub
+Actions, and follow how much the team works rather than how many users there
+are:
+
+\[
+C_{\text{dev}} \approx 3\,L + C_{\text{changelog}} + C_{\text{scripts}}
+\quad \text{per month}
+\]
+
+$C_{\text{changelog}}$ is 29 translations per new changelog entry, and
+$C_{\text{scripts}}$ covers occasional Opus scripts such as
+\texttt{condense-changelog}. Neither was measured.
+
+\subsection{One-off costs}
+
+\begin{align*}
+C_{\text{restore}} &= 0.20\,G_{\text{restore}} \\
+C_{\text{migration}} &= \frac{0.03\,r_m + 0.09\,w_m}{10^{5}}
+\end{align*}
+
+A migration that reads and rewrites 100{,}000 documents costs about \$0.12.
+Testing on \texttt{test.wordplay.dev} also uses real Firestore, function and
+email costs, at the rates in Section~2.
+
+\subsection{Not modeled}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Item & Note \\
+\midrule
+Cloud Logging & Free allowance per project; price above it not checked \\
+Firestore outbound data & Free up to 10\,GiB a month; price above it not checked \\
+Security rule reads & One extra read when a rule checks a gallery document \\
+Crawlers & Run \texttt{getPagePreview} and \texttt{getSitemap} like visitors \\
+GitHub Actions & Free while the repository is public \\
+Email inbox for \texttt{hi@} & Depends on the provider \\
+Tax & Depends on billing location \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Total}
+
+\[
+C_{\text{total}} =
+C_{\text{Claude}} + C_{\text{Firebase}} + C_{\text{fixed}}
++ C_{\text{App Check}} + C_{\text{getWebpage}} + C_{\text{dev}}
++ C_{\text{one-off}}
+\]
 
 \end{document}

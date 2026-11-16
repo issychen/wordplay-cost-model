@@ -1,0 +1,46 @@
+\documentclass{article}
+\usepackage{amsmath,amssymb}
+\usepackage{hyperref}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{The Cost of Wordplay: an Educational Programming Platform}
+\author{Issy Chen, Siran Luo}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Wordplay is an educational programming platform hosted at the University of Washington with variable cloud charges from Claude LLM calls and Firebase services, both subject to daily free usage quotas. We build a discrete cost model to predict monthly platform expenses given user counts and student activity rates. We use deterministic calculation as a baseline and Monte Carlo simulation to account for random variation in user behavior. Our small test case demonstrates nonlinear cost growth when usage exceeds free tiers, identifies major cost drivers, and lays out a plan to validate predictions against real billing data.
+\end{abstract}
+
+\section{Problem Description}
+Wordplay’s cloud infrastructure generates charges for LLM API calls, database operations, storage, and data transfer. Every resource has a daily free quota that resets overnight; only excess usage produces fees. The platform team currently lacks a reliable way to forecast how rising student activity will affect monthly spending.
+
+\noindent \textbf{Our goal:} Build a transparent mathematical model to predict Wordplay’s total monthly cloud cost from user count and activity parameters, and pinpoint the dominant cost drivers.
+
+We seek to answer three central questions:
+\begin{enumerate}
+    \item For a given number of active students and typical usage patterns, what is the expected monthly cloud cost?
+    \item How strongly does total cost respond to changes in editing time, project saves, and AI feature usage?
+    \item What activity thresholds push the platform past its free quotas and trigger steep cost increases?
+\end{enumerate}
+
+Users and resource events are discrete, and student behavior is random, so simple linear approximations fail to capture cost uncertainty. We adopt an incremental modeling approach, starting with simplifying assumptions and adding complexity, with later validation against real billing data.
+
+\section{Simplifications and Assumptions}
+The full cloud cost system for Wordplay couples many interacting, partially documented resource charges. To construct a tractable model within the scope of this project, we introduce the following simplifications, each with its associated justification or limitation.
+\begin{enumerate}
+    \item We use fixed baseline estimates of student behavior rates (writes per editing hour, save frequency, LLM token consumption) provided by the Wordplay team, rather than fitted values from platform logs. These point estimates are reasonable starting values, but they may not reflect real variation across classrooms or student groups.
+    \item We compute Firestore costs on a daily basis and apply the daily free quota separately for each day, consistent with cloud provider rules. We do not aggregate usage across the whole month before subtracting free allowance. This simplification correctly captures the daily reset rule, but it requires us to iterate day-by-day in our calculations.
+    \item We exclude secondary cost components that are not yet verified or quantified in the Wordplay documentation, such as CPU-second charges and authentication overage fees. This reduces the number of parameters we need to track, yet it means our model will slightly underpredict total cost if those omitted charges become meaningful at higher usage.
+    \item In our deterministic baseline, every student’s activity rate is identical. In the stochastic simulation, we sample activity from simple parametric distributions. We do not model correlation between students, such as synchronized class activity during scheduled lessons. This ignores clustered usage spikes that could push daily usage over thresholds more often than independent sampling predicts.
+    \item We treat collaborative gallery and shared-project sizes as exogenous input parameters instead of modeling how students naturally form shared projects. This keeps the state space small, but the model cannot endogenously predict how collaboration patterns emerge as the user base grows.
+\end{enumerate}
+
+All these simplifications let us build, implement, and test the cost model incrementally, as recommended in the project feedback. Each assumption creates a clear limitation: our outputs are conditional on these choices, and results should be interpreted with those caveats in mind. Later refinements could relax some assumptions if log data or additional billing records become available.
+
+
+
+\end{document}

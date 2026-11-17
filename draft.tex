@@ -1,9 +1,12 @@
 \documentclass{article}
 \usepackage{amsmath,amssymb}
+\usepackage{booktabs}
 \usepackage{hyperref}
 \usepackage{geometry}
 \geometry{margin=1in}
 
+\newcommand{\pos}[1]{\left(#1\right)^{+}}
+\setlength{\emergencystretch}{3em}
 \title{The Cost of Wordplay: an Educational Programming Platform}
 \author{Issy Chen, Siran Luo}
 \date{}
@@ -89,168 +92,376 @@ The real Wordplay platform is complicated, and its cost depends on many things w
 
 \section{Mathematical Model}
 
-\subsection{What kind of model is this?}
+All costs are in US dollars. Prices are for Claude's first-party API and
+Google Cloud us-central1. Per-hour activity counts marked ``estimate'' are
+assumptions, not measurements.
 
-Our problem is to predict a bill. If we knew exactly what every student did on every day, the bill would be a fixed number we could compute from the price formulas in the cost sheet. But we do not know that. Class sizes, editing hours, and how often students use the translation feature change from day to day, so we treat them as random. This means our model has two parts:
+\paragraph{Notation.} The positive part of $x$ is
+\[
+\pos{x} = \max(x, 0),
+\]
+so usage inside a free tier costs nothing.
 
-\begin{enumerate}
-    \item a \textbf{cost function}, which takes the activity on one day (writes, reads, deletes, Claude requests, and so on) and turns it into dollars, and
-    \item a \textbf{Monte Carlo simulation}, which randomly makes up many possible months of student activity, computes the bill for each one, and looks at the average and the spread.
-\end{enumerate}
+\subsection{Claude}
 
-Monte Carlo simulation is a standard method from Operations Research (see the simulation chapter in Winston's \emph{Operations Research}). The cost function is not a standard linear program. Because of the free usage limits, it is made of ``positive part'' pieces, $(x)^+ = \max(x,0)$, so it is piecewise linear: it is flat at \$0 inside a free limit and then goes up in a straight line after it. Our question about the daily cap is a small search problem: we look for the largest cap $q$ whose average monthly cost stays under the budget $B$.
+\subsubsection{Variables}
 
-\subsection{Variables and notation}
-
-We keep the names from the cost sheet when we can. The tables below list every variable we use.
-
-\paragraph{Inputs we choose.}
 \begin{center}
-\begin{tabular}{@{}l p{0.78\textwidth}@{}}
-\hline
+\begin{tabular}{ll}
+\toprule
 Symbol & Meaning \\
-\hline
-$N_{\text{tot}}$ & Total number of students (the number of users) \\
-$K$ & Number of classes \\
-$N_i$ & Number of students in class $i$, $i=1,\dots,K$ \\
-$q$ & Daily cap per user on translation requests, with $q_{\min}\le q\le q_{\max}$ \\
-$B$ & Monthly budget \\
-$S$ & Project saves per student per hour \\
-$w_h$ & Firestore writes per student per hour ($\approx 2500$) \\
-$I,\ O$ & Average input and output tokens of one translation request \\
-$U,\ W_c,\ R_c,\ T$ & Opus tokens: uncached input, written to cache, read from cache, and thinking (we use $U=1500$, $W_c=R_c=2000$, $O+T=5000$) \\
+\midrule
+$I$ & Input tokens in a Haiku call \\
+$O$ & Output tokens in a call \\
+$U$ & Uncached input tokens in an Opus call \\
+$W_c$ & Tokens written to the prompt cache \\
+$R_c$ & Tokens read from the prompt cache \\
+$T$ & Thinking tokens, billed as output \\
+$n$ & Strings being checked \\
+$k$ & Chunks of up to 40 strings \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsubsection{Translation: \texttt{getLLMTranslations} (Haiku 5.5)}
+
+\[
+C_{\text{translate}} = \frac{0.10\,I + 0.50\,O}{10^{6}}
+\]
+
+\subsubsection{Reading-level check: \texttt{analyzeLocalization} (Opus 5.5)}
+
+\[
+C_{\text{chunk}} =
+\frac{4\,U + 5\,W_c + 0.20\,R_c + 20\,(O + T)}{10^{6}}
+\]
+
+\[
+k = \left\lceil \frac{n}{40} \right\rceil
+\]
+
+With the estimates $U = 1500$, $W_c = R_c = 2000$ and $O + T = 5000$:
+
+\[
+C_{\text{check}} \approx 0.116 + 0.106\,(k - 1)
+\]
+
+\subsection{Firebase}
+
+\subsubsection{Variables}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Symbol & Meaning \\
+\midrule
+$W$ & Firestore document writes in a day** \\
+$R$ & Firestore document reads in a day** \\
+$D$ & Firestore document deletes in a day** \\
+$G$ & Firestore storage in GiB \\
+$N$ & Students in one gallery \\
+$H$ & Hours of editing** \\
+$S$ & Project saves per student per hour** \\
+$E$ & Editors in a shared project, $E \le 4$ \\
+$V$ & People with a shared project open \\
+$w_h$ & Writes per student per hour** \\
+$w_p$ & Writes to one shared project in the period \\
+$c$ & Function calls in a month** \\
+$e$ & Function outbound data in GB per month \\
+$b$ & Hosting downloads in GB per day \\
+$h$ & Hosting storage in GB \\
+\multicolumn{2}{l}{**Indicates user behaviour} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsubsection{Firestore cost per day}
+
+\[
+C_{\text{day}} =
+\frac{0.09\,\pos{W - 20000}
+    + 0.03\,\pos{R - 50000}
+    + 0.01\,\pos{D - 20000}}{10^{5}}
+\]
+
+Free allowances reset daily and do not roll over, so monthly cost is the sum
+of the daily costs:
+
+\[
+C_{\text{Firestore}} = \sum_{d=1}^{\text{days}} C_{\text{day}}(d)
+\]
+
+\subsubsection{Activity estimates}
+
+\[
+w_h = \underbrace{720}_{\text{presence}}
+    + \underbrace{1500}_{\text{typing, estimate}}
+    + \underbrace{300}_{\text{saves, estimate}}
+    \approx 2500
+\]
+
+\[
+D \approx 1500\,N H \quad \text{(typing updates removed by cleanup)}
+\]
+
+Reads in one shared gallery:
+
+\[
+R_{\text{gallery}} = N\,S\,(N - 1)\,H
+\]
+
+Reads in one project edited together:
+
+\[
+R_{\text{project}} \approx w_p\,(V - 1)
+\]
+
+\subsubsection{Class cost before the free tier}
+
+With $w_h = 2500$ and $S = 300$:
+
+\[
+C_{\text{class}} = N H \bigl(0.00225 + 0.00009\,(N - 1)\bigr)
+\]
+
+\subsubsection{Other Firebase costs}
+
+\begin{align*}
+C_{\text{storage}} &= 0.15\,\pos{G - 1} && \text{per month} \\
+C_{\text{calls}} &= \frac{0.40\,\pos{c - 2000000}}{10^{6}} && \text{per month} \\
+C_{\text{outbound}} &= 0.12\,\pos{e - 5} && \text{per month} \\
+C_{\text{hosting}} &= 0.15\,\pos{b - 0.36} && \text{per day} \\
+C_{\text{hosting storage}} &= 0.026\,\pos{h - 10} && \text{per month}
+\end{align*}
+
+Not included: function CPU and memory past 200{,}000 CPU-seconds and
+400{,}000 GB-seconds a month, and Authentication past 50{,}000 monthly active
+users. Those rates were not checked.
+
+\subsection{Fixed Costs}
+\subsubsection{Cap Costs}
+Many aspects within Wordplay operate within the free tier, fixed costs above the free tier is as follows. 
+
+\subsubsection{What counts as fixed}
+
+These are paid whether or not anyone uses the app. Most scale with the number
+of Firebase projects (\texttt{wordplay-prod} and \texttt{wordplay-dev}) or with
+the total size of the database, not with activity. Claude has no fixed fee.
+
+\subsubsection{Variables}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Symbol & Meaning \\
+\midrule
+$P$ & Firebase projects with the functions deployed \\
+$J$ & Scheduled jobs on the billing account \\
+$j$ & Scheduled jobs per project ($j = 8$) \\
+$s$ & Active secret versions on the billing account \\
+$a$ & Secret accesses in a month \\
 $G$ & Firestore database size in GiB \\
-$c,\ e,\ b_t,\ h$ & Function calls per month, outgoing function data in GB per month, hosting downloads in GB on day $t$, hosting storage in GB \\
-$j,\ P,\ s,\ a$ & Scheduled jobs per project ($j=8$), number of Firebase projects ($P=2$), secret versions, secret accesses per month \\
-$B_d,\ B_w,\ G_r,\ m_t$ & Daily backups kept (7), weekly backups kept (14), container images in GiB, Cloud Build minutes on day $t$ \\
-$e_w,\ \ell,\ G_{\text{restore}},\ r_m,\ w_m$ & \texttt{getWebpage} outgoing GB, new languages translated in a month, GiB restored from backup, documents read and written by a migration \\
-$C_{\text{Resend}},\ C_{\text{domain}}$ & Monthly cost of the email service and the domain name \\
-\hline
+$B_d$ & Daily backups kept ($B_d = 7$ in prod) \\
+$B_w$ & Weekly backups kept ($B_w = 14$ in prod) \\
+$G_r$ & Function container images stored, in GiB \\
+$m$ & Cloud Build minutes in a day \\
+\bottomrule
 \end{tabular}
 \end{center}
 
-\paragraph{Random variables (student behavior).}
-\begin{center}
-\begin{tabular}{@{}l p{0.78\textwidth}@{}}
-\hline
-Symbol & Meaning \\
-\hline
-$H_{i,t}$ & Hours of editing by class $i$ on day $t$ ($H_{i,t}=0$ if the class does not meet) \\
-$X_{u,t}$ & Number of translation requests student $u$ would like to make on day $t$ \\
-$n_t$ & Number of text strings checked for reading level on day $t$ \\
-$a_t$, $w_{p,s}$, $V_s$ & Number of shared projects on day $t$; writes to shared project $s$; people who have it open \\
-\hline
-\end{tabular}
-\end{center}
+\subsubsection{Scheduled jobs (Cloud Scheduler)}
 
-\paragraph{Quantities we compute.}
-\begin{center}
-\begin{tabular}{@{}l p{0.78\textwidth}@{}}
-\hline
-Symbol & Meaning \\
-\hline
-$W_t,\ R_t,\ D_t$ & Firestore writes, reads, and deletes on day $t$ \\
-$T_t$ & Translation requests actually made on day $t$ after the cap \\
-$k_t$ & Number of chunks of up to 40 strings on day $t$ \\
-$A,\ d$ & reCAPTCHA assessments per month and active devices \\
-$C_{\text{total}}$ & Total monthly cost \\
-$n_{\text{sim}}$ & Number of simulated months \\
-\hline
-\end{tabular}
-\end{center}
+Each job costs \$0.10 per 31 days. The first 3 jobs on the billing account are
+free, and executions are not billed.
 
-\subsection{From student activity to daily counts}
-
-On day $t$, class $i$ has $N_i$ students who edit for $H_{i,t}$ hours. We assume all students in a class act the same way (see Simplifications). Then the Firestore counts for the day are
-\begin{align*}
-W_t &= \sum_{i=1}^{K} w_h\, N_i\, H_{i,t}, \\
-R_t &= \sum_{i=1}^{K} N_i\, S\,(N_i-1)\, H_{i,t} \;+\; \sum_{s=1}^{a_t} w_{p,s}\,(V_s-1), \\
-D_t &= \sum_{i=1}^{K} 1500\, N_i\, H_{i,t}.
-\end{align*}
-The first part of $R_t$ is the reads in shared galleries, which grows with $N_i^2$. The second part is the reads in projects that are edited together.
-
-For Claude, the cap $q$ limits how many translation requests each student can make in a day, so
 \[
-T_t = \sum_{u=1}^{N_{\text{tot}}} \min\bigl(X_{u,t},\, q\bigr).
-\]
-One translation request costs
-\[
-C_{\text{translate}} = \frac{0.10\, I + 0.50\, O}{10^6}.
-\]
-The reading-level check works on $n_t$ strings in chunks of up to 40, so $k_t=\lceil n_t/40\rceil$, and with the cost sheet's estimates the cost of the day is
-\[
-C_{\text{check},t} =
-\begin{cases}
-0 & n_t = 0, \\
-0.116 + 0.106\,(k_t-1) & n_t > 0.
-\end{cases}
-\]
-(The exact formula for one chunk is $(4U + 5W_c + 0.20R_c + 20(O+T))/10^6$.) The Claude cost of the month is
-\[
-C_{\text{Claude}} = \sum_{t=1}^{\text{days}} \Bigl( T_t\, C_{\text{translate}} + C_{\text{check},t} \Bigr).
+J = j\,P, \qquad
+C_{\text{scheduler}} = 0.10\,\pos{J - 3} \quad \text{per month}
 \]
 
-\subsection{Firebase costs}
+With $j = 8$ and $P = 2$: $C_{\text{scheduler}} = 0.10 \times 13 = \$1.30$.
 
-The free limits for Firestore reset each day, so we find the cost day by day and add:
+Running the jobs costs about 1{,}000 function calls per project each month
+(mostly the hourly \texttt{compactProjectUpdates} and the 4-hourly chat
+digest), well inside the free 2 million.
+
+\subsubsection{Secrets (Secret Manager)}
+
 \[
-C_{\text{day}}(t) = \frac{0.09\,(W_t-20000)^+ + 0.03\,(R_t-50000)^+ + 0.01\,(D_t-20000)^+}{10^5},
+C_{\text{secrets}} = 0.06\,\pos{s - 6}
+                   + \frac{0.03\,\pos{a - 10000}}{10^{4}}
+                   \quad \text{per month}
+\]
+
+Three secrets in two projects is $s = 6$, which is free. A secret is read when
+a function instance starts, so $a$ grows with cold starts.
+
+\subsubsection{Backups and point-in-time recovery (prod only)}
+
+Assuming each backup is the size of the database:
+
+\[
+C_{\text{backups}} = 0.03\,(B_d + B_w)\,G = 0.63\,G
 \qquad
-C_{\text{Firestore}} = \sum_{t=1}^{\text{days}} C_{\text{day}}(t).
+C_{\text{PITR}} = 0.15\,G
+\quad \text{per month}
 \]
-The other Firebase costs also use the positive part, because each has a free limit:
-\begin{align*}
-C_{\text{storage}} &= 0.15\,(G-1)^+ \text{ per month}, &
-C_{\text{calls}} &= \frac{0.40\,(c-2{,}000{,}000)^+}{10^6} \text{ per month}, \\
-C_{\text{outbound}} &= 0.12\,(e-5)^+ \text{ per month}, &
-C_{\text{hosting}} &= \sum_{t=1}^{\text{days}} 0.15\,(b_t-0.36)^+, \\
-C_{\text{hosting storage}} &= 0.026\,(h-10)^+ \text{ per month}. & &
-\end{align*}
-Together,
-\[
-C_{\text{Firebase}} = C_{\text{Firestore}} + C_{\text{storage}} + C_{\text{calls}} + C_{\text{outbound}} + C_{\text{hosting}} + C_{\text{hosting storage}}.
-\]
-We count function calls as the translation requests, the reading-level chunks, and about 1000 calls per project for the scheduled jobs: $c = \sum_t (T_t + k_t) + 1000\,P$. To avoid counting the \texttt{getWebpage} data twice, $e$ is the outgoing data of the other functions, and \texttt{getWebpage} is counted on its own below.
 
-\subsection{Fixed costs and the remaining items}
+Protecting the data costs about five times what storing it does. Ignoring the
+free 1\,GiB, the total for data is:
 
-The fixed costs are paid every month no matter how many students there are:
 \[
-C_{\text{fixed}} = C_{\text{scheduler}} + C_{\text{secrets}} + C_{\text{backups}} + C_{\text{PITR}} + C_{\text{registry}} + \sum_{t=1}^{\text{days}} C_{\text{build}}(t) + C_{\text{Resend}} + C_{\text{domain}},
+C_{\text{data}} \approx 0.15\,G + 0.63\,G + 0.15\,G = 0.93\,G
+\quad \text{per month}
 \]
-where
+
+These have no free tier and grow with total data kept, not with activity.
+
+\subsubsection{Deploys}
+
+Every push to \texttt{main} redeploys hosting, rules and every function.
+
 \begin{align*}
-C_{\text{scheduler}} &= 0.10\,(jP-3)^+, &
-C_{\text{secrets}} &= 0.06\,(s-6)^+ + \frac{0.03\,(a-10000)^+}{10^4}, \\
-C_{\text{backups}} &= 0.03\,(B_d+B_w)\,G = 0.63\,G, &
-C_{\text{PITR}} &= 0.15\,G, \\
-C_{\text{registry}} &= 0.10\,(G_r-0.5)^+, &
-C_{\text{build}}(t) &= 0.003\,(m_t-120)^+.
+C_{\text{build}} &= 0.003\,\pos{m - 120} && \text{per day} \\
+C_{\text{registry}} &= 0.10\,\pos{G_r - 0.5} && \text{per month}
 \end{align*}
 
-App Check depends on the number of active devices. We assume each student uses one device, so $d=N_{\text{tot}}$ and $A \approx 4.3\,d$ assessments per month:
+$G_r$ depends on whether old images are cleaned up, which is set in Artifact
+Registry rather than in the repository. Hosting files are about 223\,MB per
+release, inside the free 10\,GB unless many old releases are kept.
+
+\subsubsection{Outside Google Cloud}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Item & Cost \\
+\midrule
+Resend plan & Not checked; free tier or a monthly plan \\
+\texttt{wordplay.dev} domain & Yearly, from the registrar \\
+GitHub & Free \\
+Anthropic & No fixed fee; pay per token only \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsubsection{Total fixed cost}
+
+\[
+C_{\text{fixed}} =
+C_{\text{scheduler}} + C_{\text{secrets}} + C_{\text{backups}}
++ C_{\text{PITR}} + C_{\text{registry}} + \sum_{\text{days}} C_{\text{build}}
++ C_{\text{Resend}} + C_{\text{domain}}
+\]
+
+For a database of a few GiB this is a few dollars a month, plus Resend and the
+domain.
+
+\subsection{Other costs}
+
+\subsubsection{Variables}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Symbol & Meaning \\
+\midrule
+$A$ & reCAPTCHA assessments in a month, across the organization \\
+$d$ & Active devices that call a Cloud Function in a month \\
+$e_w$ & Outbound GB from \texttt{getWebpage} in a month \\
+$L$ & New languages translated in a month \\
+$G_{\text{restore}}$ & GiB restored from a backup \\
+$r_m$ & Documents read by a migration \\
+$w_m$ & Documents written by a migration \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsubsection{App Check (reCAPTCHA)}
+
+A token lasts 7 days and is only requested when a Cloud Function is called,
+so each active device makes about one assessment a week:
+
+\[
+A \approx 4.3\,d
+\]
+
 \[
 C_{\text{App Check}} =
 \begin{cases}
-0 & A \le 10000, \\
-8 & 10000 < A \le 100000, \\
-8 + \dfrac{A-100000}{1000} & A > 100000.
+0 & A \le 10000 \\
+8 & 10000 < A \le 100000 \\
+8 + \dfrac{A - 100000}{1000} & A > 100000
 \end{cases}
-\]
-The last three items are not driven by the number of students, so we set them as inputs:
-\[
-C_{\text{getWebpage}} \approx 0.12\, e_w, \qquad
-C_{\text{dev}} \approx 3\ell + C_{\text{changelog}} + C_{\text{scripts}}, \qquad
-C_{\text{one-off}} = 0.20\, G_{\text{restore}} + \frac{0.03\, r_m + 0.09\, w_m}{10^5}.
+\quad \text{per month}
 \]
 
-\subsection{The full model}
+The pricing page lists \$1 per 1{,}000 above 100{,}000 assessments without
+saying whether the \$8 fee still applies; this formula assumes it does.
 
-Putting everything together, the total cost of one simulated month is
+\subsubsection{\texttt{getWebpage}}
+
+The function fetches any URL with no sign-in, App Check or size limit, so its
+cost is set by whoever calls it. Its outbound data shares the function
+allowance of 5\,GB, so once that is used each extra GB costs:
+
 \[
-C_{\text{total}} = C_{\text{Claude}} + C_{\text{Firebase}} + C_{\text{fixed}} + C_{\text{App Check}} + C_{\text{getWebpage}} + C_{\text{dev}} + C_{\text{one-off}}
+C_{\text{getWebpage}} \approx 0.12\,e_w
+\quad \text{per month, plus running time}
 \]
-This is a function of the inputs ($N_{\text{tot}}$, $K$, $N_i$, $q$, and the others) and of the random behavior ($H_{i,t}$, $X_{u,t}$, $n_t$, and the shared-project variables). Running the simulation $n_{\text{sim}}$ times gives $n_{\text{sim}}$ values $C_{\text{total}}^{(1)},\dots,C_{\text{total}}^{(n_{\text{sim}})}$. We report their average and a 95\% confidence interval for it. To answer our question about the cap, note that a larger $q$ can only allow more translation requests, so the cost never goes down as $q$ goes up. This means we can find the largest $q \in [q_{\min}, q_{\max}]$ with average cost at most $B$ by trying values of $q$ (for example by bisection).
+
+\subsubsection{Development use of Claude}
+
+These use the project's Anthropic key from developers' machines and GitHub
+Actions, and follow how much the team works rather than how many users there
+are:
+
+\[
+C_{\text{dev}} \approx 3\,L + C_{\text{changelog}} + C_{\text{scripts}}
+\quad \text{per month}
+\]
+
+$C_{\text{changelog}}$ is 29 translations per new changelog entry, and
+$C_{\text{scripts}}$ covers occasional Opus scripts such as
+\texttt{condense-changelog}. Neither was measured.
+
+\subsubsection{One-off costs}
+
+\begin{align*}
+C_{\text{restore}} &= 0.20\,G_{\text{restore}} \\
+C_{\text{migration}} &= \frac{0.03\,r_m + 0.09\,w_m}{10^{5}}
+\end{align*}
+
+A migration that reads and rewrites 100{,}000 documents costs about \$0.12.
+Testing on \texttt{test.wordplay.dev} also uses real Firestore, function and
+email costs, at the rates in Section~2.
+
+\subsubsection{Not modeled}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Item & Note \\
+\midrule
+Cloud Logging & Free allowance per project; price above it not checked \\
+Firestore outbound data & Free up to 10\,GiB a month; price above it not checked \\
+Security rule reads & One extra read when a rule checks a gallery document \\
+Crawlers & Run \texttt{getPagePreview} and \texttt{getSitemap} like visitors \\
+GitHub Actions & Free while the repository is public \\
+Email inbox for \texttt{hi@} & Depends on the provider \\
+Tax & Depends on billing location \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsubsection{Total}
+
+\[
+C_{\text{total}} =
+C_{\text{Claude}} + C_{\text{Firebase}} + C_{\text{fixed}}
++ C_{\text{App Check}} + C_{\text{getWebpage}} + C_{\text{dev}}
++ C_{\text{one-off}}
+\]
 
 % Paste this section into your main document (after the Mathematical Model section).
 % Needs: \usepackage{amsmath,amssymb}   (pseudocode uses plain verbatim, no extra packages)

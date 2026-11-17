@@ -252,5 +252,125 @@ C_{\text{total}} = C_{\text{Claude}} + C_{\text{Firebase}} + C_{\text{fixed}} + 
 \]
 This is a function of the inputs ($N_{\text{tot}}$, $K$, $N_i$, $q$, and the others) and of the random behavior ($H_{i,t}$, $X_{u,t}$, $n_t$, and the shared-project variables). Running the simulation $n_{\text{sim}}$ times gives $n_{\text{sim}}$ values $C_{\text{total}}^{(1)},\dots,C_{\text{total}}^{(n_{\text{sim}})}$. We report their average and a 95\% confidence interval for it. To answer our question about the cap, note that a larger $q$ can only allow more translation requests, so the cost never goes down as $q$ goes up. This means we can find the largest $q \in [q_{\min}, q_{\max}]$ with average cost at most $B$ by trying values of $q$ (for example by bisection).
 
+% Paste this section into your main document (after the Mathematical Model section).
+% Needs: \usepackage{amsmath,amssymb}   (pseudocode uses plain verbatim, no extra packages)
 
+\section{Solution of the Mathematical Problem}
+
+\subsection{Overview}
+
+Our model has a cost function (the formulas from the Mathematical Model section) and random student behavior. We solve it in three steps:
+
+\begin{enumerate}
+    \item \textbf{Deterministic baseline.} Every student acts the same way every day, and we compute the cost directly from the formulas.
+    \item \textbf{Monte Carlo simulation.} We randomly generate many possible months of student activity, compute the cost of each one, and look at the average and the spread.
+    \item \textbf{Analysis.} We use the simulation to find the cost drivers (sensitivity analysis) and to choose a daily cap $q$ that keeps the cost under the budget $B$.
+\end{enumerate}
+
+We will write the code in Python, using NumPy for random numbers and Pandas for tables of results.
+
+\subsection{Step 1: Deterministic baseline}
+
+In the baseline, each class meets for the same number of hours $H$ every school day, and every student makes the same number of translation requests. Then the counts $W_t$, $R_t$, $D_t$ are the same on every school day, and the monthly cost is the daily cost added up over the days of the month. No random numbers are needed, so this is a fast way to check the formulas.
+
+\paragraph{Example: when do we go over the free limits?}
+Take one class of $N$ students that edits for $H=1$ hour, with $S=300$ and $w_h=2500$. The free limits are 20{,}000 writes, 50{,}000 reads, and 20{,}000 deletes per day. We find the smallest class size that goes over each limit:
+\begin{itemize}
+    \item Writes: $2500\,N > 20000$ means $N \ge 9$.
+    \item Reads: $300\,N(N-1) > 50000$ means $N(N-1) > 166.7$, so $N \ge 14$ (since $13\cdot 12 = 156$ is too small and $14 \cdot 13 = 182$ is enough).
+    \item Deletes: $1500\,N > 20000$ means $N \ge 14$.
+\end{itemize}
+So a single class starts paying for writes at 9 students, and for reads and deletes at 14 students. This kind of calculation answers our question about which activity levels push the platform past its free limits.
+
+\subsection{Step 2: Monte Carlo simulation}
+
+\paragraph{Why we need it.}
+The cost function has kinks at the free limits, and it bends upward after each one (it is a convex function). Because of this, computing the cost from the \emph{average} activity gives a number that is too small. Days with high activity cost more than days with low activity save. Here is a small example. Take one class of 30 students. Suppose the class either does not meet ($H=0$) or meets for 2 hours ($H=2$), each with probability $1/2$, so the average is $H=1$ hour.
+\begin{itemize}
+    \item Using the average, $H=1$: the daily cost is $\$0.115$ (from our example in the Mathematical Model section).
+    \item With $H=2$: $W=150{,}000$, $R=522{,}000$, $D=90{,}000$, so the cost is $\dfrac{0.09(130000)+0.03(472000)+0.01(70000)}{10^5} = \dfrac{26560}{10^5} \approx \$0.266$. With $H=0$ the cost is \$0. The expected daily cost is $\tfrac12(0.266) + \tfrac12(0) \approx \$0.133$.
+\end{itemize}
+The expected cost, \$0.133, is about 15\% higher than the cost of the average day, \$0.115. This is why we simulate the random days instead of only using averages.
+
+\paragraph{What we sample.}
+In each simulated month, we randomly generate the following. These distributions are our own simple choices, since we do not have real usage logs, and we vary them in the sensitivity analysis.
+\begin{itemize}
+    \item Whether class $i$ meets on day $t$: it meets with probability $p_{\text{meet}}$ (for example, $p_{\text{meet}} = 2/3$, which gives about 20 school days in a 30-day month).
+    \item If it meets, the hours $H_{i,t}$: for example, 1 or 2 hours with equal probability.
+    \item The number of translation requests $X_{u,t}$ each student wants to make: a Poisson random variable with mean $\lambda$ (a standard choice for counts of random events).
+    \item The number of strings $n_t$ checked for reading level: a Poisson random variable with mean $\mu$.
+\end{itemize}
+The class sizes $N_i$, the number of classes $K$, the cap $q$, and all the prices and fixed costs are inputs that we choose for each scenario.
+
+\paragraph{Pseudocode for one simulated month.}
+\begin{verbatim}
+function SimulateMonth(inputs):
+    total_Firestore = 0, total_Claude = 0, total_calls = 0
+    for t = 1 to days:
+        W = 0, R = 0, D = 0
+        for i = 1 to K:
+            if Uniform(0,1) < p_meet:
+                H = sample hours
+                W = W + w_h * N_i * H
+                R = R + N_i * S * (N_i - 1) * H
+                D = D + 1500 * N_i * H
+        R = R + sum over shared projects of w_p * (V - 1)
+        # Firestore cost of day t (free limits reset each day)
+        C_day = (0.09*pos(W-20000) + 0.03*pos(R-50000)
+                 + 0.01*pos(D-20000)) / 10^5
+        total_Firestore = total_Firestore + C_day
+        # Claude cost of day t
+        T_t = sum over students u of min(X_{u,t}, q)
+        n_t = sample from Poisson(mu)
+        k_t = ceil(n_t / 40)
+        if n_t = 0: C_check = 0
+        else:       C_check = 0.116 + 0.106 * (k_t - 1)
+        total_Claude = total_Claude + T_t * C_translate + C_check
+        total_calls = total_calls + T_t + k_t
+    c = total_calls + 1000 * P
+    C_otherFirebase = C_storage + C_calls(c) + C_outbound
+                      + C_hosting + C_hostingStorage
+    C_fixed = scheduler + secrets + backups + PITR + registry
+              + builds + Resend + domain
+    C_total = total_Claude + total_Firestore + C_otherFirebase
+              + C_fixed + C_AppCheck + C_getWebpage + C_dev + C_oneOff
+    return C_total and each of its parts
+\end{verbatim}
+
+\paragraph{Pseudocode for the full simulation.}
+\begin{verbatim}
+function MonteCarlo(inputs, n_sim):
+    for r = 1 to n_sim:
+        C[r] = SimulateMonth(inputs)
+    mean = average of C[1..n_sim]
+    s    = standard deviation of C[1..n_sim]
+    CI   = mean +/- 1.96 * s / sqrt(n_sim)
+    return mean, s, CI
+\end{verbatim}
+The interval $\bar{C} \pm 1.96\, s/\sqrt{n_{\text{sim}}}$ is a 95\% confidence interval for the true expected monthly cost. We choose $n_{\text{sim}}$ large enough (for example 1000) that this interval is narrow, and we report it with every average.
+
+\subsection{Step 3: Analysis}
+
+\paragraph{Cost drivers.}
+For each simulated month, we save every part of the cost separately ($C_{\text{Firestore}}$, $C_{\text{Claude}}$, $C_{\text{fixed}}$, and so on). Averaging each part over all months tells us what share of the bill each part makes up.
+
+\paragraph{Sensitivity analysis.}
+Many of our inputs are estimates, so we check how much they matter. We change one input at a time (for example, up and down by 20\%), keep the others fixed, rerun the simulation, and record how much the average monthly cost changes. The inputs that move the cost the most are the ones whose real values we most need to know.
+
+\paragraph{Choosing the daily cap.}
+The cost never goes down when $q$ goes up, because a higher cap can only allow more translation requests. So we can find the largest cap $q \in [q_{\min}, q_{\max}]$ with average cost at most $B$ by bisection (trying the middle value and cutting the interval in half each time). To make the comparison fair, we reuse the same random numbers for every value of $q$.
+\begin{verbatim}
+function FindCap(q_min, q_max, B):
+    if MonteCarlo(q_max).mean <= B: return q_max
+    if MonteCarlo(q_min).mean >  B: return "no cap works"
+    while q_max - q_min > 1:
+        q = floor((q_min + q_max) / 2)
+        if MonteCarlo(q).mean <= B: q_min = q
+        else:                       q_max = q
+    return q_min
+\end{verbatim}
+
+\subsection{Checking the code}
+
+Before trusting the simulation, we test it on cases where we know the answer. If we set all randomness to a fixed value (for example $p_{\text{meet}}=1$ and one class of 30 students with $H=1$), the simulation must give the same Firestore cost as our hand calculation, \$0.115 per day. We also check that the baseline and the simulation agree when the random numbers have no spread, and that the simulated average goes up when we increase $N_{\text{tot}}$.
 \end{document}

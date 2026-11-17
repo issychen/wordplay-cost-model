@@ -12,35 +12,245 @@
 \maketitle
 
 \begin{abstract}
-Wordplay is an educational programming platform hosted at the University of Washington with variable cloud charges from Claude LLM calls and Firebase services, both subject to daily free usage quotas. We build a discrete cost model to predict monthly platform expenses given user counts and student activity rates. We use deterministic calculation as a baseline and Monte Carlo simulation to account for random variation in user behavior. Our small test case demonstrates nonlinear cost growth when usage exceeds free tiers, identifies major cost drivers, and lays out a plan to validate predictions against real billing data.
+Wordplay is a free coding platform built by Professor Amy Ko at UW for students, teachers, and families. Running it costs money from Firebase, Claude AI tools, and fixed items like backups. We build a daily cost model. Student activity creates database operations, and each day we subtract the free usage limit before counting charges. Monthly cost is the total of the daily costs plus the fixed costs. We build the model in steps, starting with the biggest cost parts and then adding the rest. We use Monte Carlo simulation to try different class sizes and activity levels, and we check which factors change the cost the most.
 \end{abstract}
 
 \section{Problem Description}
-Wordplay’s cloud infrastructure generates charges for LLM API calls, database operations, storage, and data transfer. Every resource has a daily free quota that resets overnight; only excess usage produces fees. The platform team currently lacks a reliable way to forecast how rising student activity will affect monthly spending.
 
-\noindent \textbf{Our goal:} Build a transparent mathematical model to predict Wordplay’s total monthly cloud cost from user count and activity parameters, and pinpoint the dominant cost drivers.
+\paragraph{Background.}
+Wordplay is an open-source coding platform built with educational justice in mind. It serves students and children, and also families, teachers, and the general public. Keeping it online costs real money. User projects are saved and synced through Firebase (Hosting, Firestore, Authentication, and Functions). Firebase charges for Firestore reads, writes, and deletes, and also for storage, function calls, outgoing data, and hosting. Wordplay also uses Claude AI to help students translate projects and chats, and to check how easy text is to read. Some costs are fixed, which means we pay them even if nobody uses the app. Examples are scheduled jobs, backups, and deploys. Firebase also gives free usage limits that reset every day (or month). So the final bill depends not only on how much people use Wordplay, but also on whether they go over these free limits.
 
-We seek to answer three central questions:
+\paragraph{Goal.}
+The goal of this model is to predict the cost of Wordplay for some number of users to identify drivers of costs, given the fixed costs per month, the bounds of the daily cap per user, and the amount of function costs.
+
+\paragraph{Why it matters.}
+Wordplay is run by a research group at UW and is meant to stay free and easy for students to use. Some costs do not grow in a simple way with the number of users. For example, the number of reads in a shared gallery is
+\[ R_{\text{gallery}} = N\,S\,(N-1)\,H, \]
+where $N$ is the number of students, $S$ is how many times a student saves per hour, and $H$ is the hours of editing. This grows with $N^2$, so a few large classes can make the cost jump much higher than a simple straight-line guess. Other costs do not depend on users at all. For example, keeping backups of the database costs about five times as much as storing the data. A good cost forecast helps the team plan their budget, set reasonable daily limits for each user, and decide which technical changes would save the most money. It also helps the server side run smoothly, so the platform is easier to maintain.
+
+\paragraph{Questions we want to answer.}
 \begin{enumerate}
-    \item For a given number of active students and typical usage patterns, what is the expected monthly cloud cost?
-    \item How strongly does total cost respond to changes in editing time, project saves, and AI feature usage?
-    \item What activity thresholds push the platform past its free quotas and trigger steep cost increases?
+    \item What happens to the monthly bill when we go from $N_1$ students up to $N_2$ students, and when do we start going over the free usage limits?
+    \item Which part costs the most: Firestore reads, writes, or deletes, Claude AI requests, hosting, storage, or the fixed costs?
+    \item How does the size of a class or shared gallery change the total cost, since gallery reads grow with $N^2$?
+    \item Within the bounds of the daily cap per user, which cap keeps the monthly cost below our budget $B$?
+    \item How much does the cost change if our guesses for numbers like writes per student per hour $w_h$ and saves per student per hour $S$ are off?
 \end{enumerate}
 
-Users and resource events are discrete, and student behavior is random, so simple linear approximations fail to capture cost uncertainty. We adopt an incremental modeling approach, starting with simplifying assumptions and adding complexity, with later validation against real billing data.
+\section{Simplifications}
 
-\section{Simplifications and Assumptions}
-The full cloud cost system for Wordplay couples many interacting, partially documented resource charges. To construct a tractable model within the scope of this project, we introduce the following simplifications, each with its associated justification or limitation.
+The real Wordplay platform is complicated, and its cost depends on many things we cannot track exactly. To get a model we can solve and understand, we make the following simplifications.
+
 \begin{enumerate}
-    \item We use fixed baseline estimates of student behavior rates (writes per editing hour, save frequency, LLM token consumption) provided by the Wordplay team, rather than fitted values from platform logs. These point estimates are reasonable starting values, but they may not reflect real variation across classrooms or student groups.
-    \item We compute Firestore costs on a daily basis and apply the daily free quota separately for each day, consistent with cloud provider rules. We do not aggregate usage across the whole month before subtracting free allowance. This simplification correctly captures the daily reset rule, but it requires us to iterate day-by-day in our calculations.
-    \item We exclude secondary cost components that are not yet verified or quantified in the Wordplay documentation, such as CPU-second charges and authentication overage fees. This reduces the number of parameters we need to track, yet it means our model will slightly underpredict total cost if those omitted charges become meaningful at higher usage.
-    \item In our deterministic baseline, every student’s activity rate is identical. In the stochastic simulation, we sample activity from simple parametric distributions. We do not model correlation between students, such as synchronized class activity during scheduled lessons. This ignores clustered usage spikes that could push daily usage over thresholds more often than independent sampling predicts.
-    \item We treat collaborative gallery and shared-project sizes as exogenous input parameters instead of modeling how students naturally form shared projects. This keeps the state space small, but the model cannot endogenously predict how collaboration patterns emerge as the user base grows.
+    \item \textbf{We build the model in steps.}
+    Our first step includes the biggest cost parts: the Firestore reads, writes, and deletes from student activity, the Claude AI requests, and the fixed monthly costs. In later steps we add Firestore storage, function calls, outgoing data, hosting, App Check (reCAPTCHA), and a few extra items. The full model follows the total in the cost sheet:
+    \[
+    C_{\text{total}} = C_{\text{Claude}} + C_{\text{Firebase}} + C_{\text{fixed}} + C_{\text{App Check}} + C_{\text{getWebpage}} + C_{\text{dev}} + C_{\text{one-off}},
+    \]
+    where
+    \[
+    C_{\text{Firebase}} = C_{\text{Firestore}} + C_{\text{storage}} + C_{\text{calls}} + C_{\text{outbound}} + C_{\text{hosting}} + C_{\text{hosting storage}}.
+    \]
+    Building in steps lets us understand every piece we add. The sensitivity analysis will also show which pieces matter most.
+
+    \item \textbf{We model one month, one day at a time.}
+    Firebase's free usage limits reset every day and do not carry over, so the cost of one day does not depend on the days before it. This lets us compute the cost of each day and add them up for the month:
+    \[
+    C_{\text{Firestore}} = \sum_{t=1}^{\text{days}} C_{\text{day}}(t), \qquad
+    C_{\text{day}} = \frac{0.09\,(W-20000)^+ + 0.03\,(R-50000)^+ + 0.01\,(D-20000)^+}{10^5},
+    \]
+    where $W$, $R$, $D$ are the writes, reads, and deletes in one day, and $(x)^+ = \max(x,0)$, so usage inside the free limit costs nothing. We treat all days as equally busy, so we miss busy or slow times like assignment deadlines or summer break.
+
+    \item \textbf{Our activity numbers are estimates.}
+    We do not have measured data on how students use the platform, so we use the estimates from the cost sheet: $w_h \approx 2500$ writes per student per hour (720 presence $+$ 1500 typing $+$ 300 saves), deletes $D \approx 1500\,NH$, and Claude token counts $U=1500$, $W_c=R_c=2000$, $O+T=5000$. The model is only as good as these inputs, so if they are off, the predicted cost is off too. To deal with this, we run a sensitivity analysis where we change each estimate and see how much the total cost moves. Real user logs would let us use real numbers instead.
+
+    \item \textbf{We assume every student in a class acts the same way.}
+    All students have the same editing hours $H$ and saves per hour $S$. Students in one class usually work on the same assignment at the same time, so this is a reasonable first step. It also lets us describe a class with just a few numbers: $N$, $H$, and $S$. In real life, some students and classes are much more active than others, so our estimate could be too low for busy classes.
+
+    \item \textbf{We use simple formulas for shared work and Claude requests.}
+    Reads from shared work are hard to count exactly, so we use the approximations from the cost sheet: $R_{\text{gallery}} = NS(N-1)H$ for a gallery of $N$ students, and $R_{\text{project}} \approx w_p\,(V-1)$ for a project edited together, with at most $E \le 4$ editors. For Claude, checking the reading level of $n$ text strings is split into $k=\lceil n/40\rceil$ chunks of up to 40 strings. Since the chunks are about the same size, we use one average cost, $C_{\text{check}} \approx 0.116 + 0.106\,(k-1)$ dollars. The real cost changes with how long each prompt and reply is.
+
+    \item \textbf{Fixed costs are constants, and daily caps are inputs.}
+    Our goal is to predict cost given the fixed costs per month and the bounds of the daily cap per user. The fixed costs are the items we pay whether or not anyone uses the app: scheduled jobs, secrets, backups and point-in-time recovery, the container registry, deploys, and outside items like the email service and the domain name:
+    \[
+    C_{\text{fixed}} = C_{\text{scheduler}} + C_{\text{secrets}} + C_{\text{backups}} + C_{\text{PITR}} + C_{\text{registry}} + \sum_{\text{days}} C_{\text{build}} + C_{\text{Resend}} + C_{\text{domain}}.
+    \]
+    For example, with $j=8$ scheduled jobs per project and $P=2$ projects, $C_{\text{scheduler}} = 0.10\,(J-3)^+ = \$1.30$ per month. We assume each backup is the size of the database, as in the cost sheet, so backups and recovery cost about $0.93\,G$ per month for a database of $G$ GiB. For a database of a few GiB, the fixed costs add up to a few dollars a month, plus the email service and the domain. We treat these as constants for a given month. We treat the daily cap per user as a strict limit $q$ between a lower bound $q_{\min}$ and an upper bound $q_{\max}$, so we can ask which cap keeps the cost under a budget. We do not model what students do once they hit the cap.
+
+    \item \textbf{Costs that do not depend on students are set as inputs.}
+    Some items in the total do not depend on the number of students in a simple way, so we set them as inputs instead of simulating them. The App Check cost depends on the number of active devices $d$, using about $A \approx 4.3\,d$ assessments per month and the cost sheet's assumption that the \$8 fee applies once $A$ is over 10{,}000. The \texttt{getWebpage} function can be called by anyone, so we use $C_{\text{getWebpage}} \approx 0.12\,e_w$ for $e_w$ GB of outgoing data. Developers' Claude use, $C_{\text{dev}} \approx 3\ell + C_{\text{changelog}} + C_{\text{scripts}}$ for $\ell$ new languages a month, follows how much the team works, and the cost sheet says it was not measured. One-off costs, like restoring a backup ($0.20$ per GiB restored) or running a database migration, happen only sometimes. We try a few values for these items and see whether they change the answer.
+
+    \item \textbf{Some costs are left out.}
+    We ignore extra charges for Cloud Function CPU and memory above the monthly free amount (200{,}000 CPU-seconds and 400{,}000 GB-seconds), and Authentication fees above 50{,}000 monthly active users. We also leave out the items the cost sheet does not give prices for, such as logging, Firestore outgoing data above the free amount, security rule reads, crawlers, the email inbox, and tax. The model will underestimate the bill if usage gets high enough to trigger these charges.
+
+    \item \textbf{Other assumptions.}
+    We use the prices from the cost sheet (Claude API and Google Cloud us-central1, in US dollars) and assume they stay the same. We also choose the number of users $N$ ourselves instead of predicting how users join or leave, so our model answers ``how much would $N$ users cost?''
 \end{enumerate}
 
-All these simplifications let us build, implement, and test the cost model incrementally, as recommended in the project feedback. Each assumption creates a clear limitation: our outputs are conditional on these choices, and results should be interpreted with those caveats in mind. Later refinements could relax some assumptions if log data or additional billing records become available.
+\section{Mathematical Model}
 
+\subsection{What kind of model is this?}
+
+Our problem is to predict a bill. If we knew exactly what every student did on every day, the bill would be a fixed number we could compute from the price formulas in the cost sheet. But we do not know that. Class sizes, editing hours, and how often students use the translation feature change from day to day, so we treat them as random. This means our model has two parts:
+
+\begin{enumerate}
+    \item a \textbf{cost function}, which takes the activity on one day (writes, reads, deletes, Claude requests, and so on) and turns it into dollars, and
+    \item a \textbf{Monte Carlo simulation}, which randomly makes up many possible months of student activity, computes the bill for each one, and looks at the average and the spread.
+\end{enumerate}
+
+Monte Carlo simulation is a standard method from Operations Research (see the simulation chapter in Winston's \emph{Operations Research}). The cost function is not a standard linear program. Because of the free usage limits, it is made of ``positive part'' pieces, $(x)^+ = \max(x,0)$, so it is piecewise linear: it is flat at \$0 inside a free limit and then goes up in a straight line after it. Our question about the daily cap is a small search problem: we look for the largest cap $q$ whose average monthly cost stays under the budget $B$.
+
+\subsection{Variables and notation}
+
+We keep the names from the cost sheet when we can. The tables below list every variable we use.
+
+\paragraph{Inputs we choose.}
+\begin{center}
+\begin{tabular}{@{}l p{0.78\textwidth}@{}}
+\hline
+Symbol & Meaning \\
+\hline
+$N_{\text{tot}}$ & Total number of students (the number of users) \\
+$K$ & Number of classes \\
+$N_i$ & Number of students in class $i$, $i=1,\dots,K$ \\
+$q$ & Daily cap per user on translation requests, with $q_{\min}\le q\le q_{\max}$ \\
+$B$ & Monthly budget \\
+$S$ & Project saves per student per hour \\
+$w_h$ & Firestore writes per student per hour ($\approx 2500$) \\
+$I,\ O$ & Average input and output tokens of one translation request \\
+$U,\ W_c,\ R_c,\ T$ & Opus tokens: uncached input, written to cache, read from cache, and thinking (we use $U=1500$, $W_c=R_c=2000$, $O+T=5000$) \\
+$G$ & Firestore database size in GiB \\
+$c,\ e,\ b_t,\ h$ & Function calls per month, outgoing function data in GB per month, hosting downloads in GB on day $t$, hosting storage in GB \\
+$j,\ P,\ s,\ a$ & Scheduled jobs per project ($j=8$), number of Firebase projects ($P=2$), secret versions, secret accesses per month \\
+$B_d,\ B_w,\ G_r,\ m_t$ & Daily backups kept (7), weekly backups kept (14), container images in GiB, Cloud Build minutes on day $t$ \\
+$e_w,\ \ell,\ G_{\text{restore}},\ r_m,\ w_m$ & \texttt{getWebpage} outgoing GB, new languages translated in a month, GiB restored from backup, documents read and written by a migration \\
+$C_{\text{Resend}},\ C_{\text{domain}}$ & Monthly cost of the email service and the domain name \\
+\hline
+\end{tabular}
+\end{center}
+
+\paragraph{Random variables (student behavior).}
+\begin{center}
+\begin{tabular}{@{}l p{0.78\textwidth}@{}}
+\hline
+Symbol & Meaning \\
+\hline
+$H_{i,t}$ & Hours of editing by class $i$ on day $t$ ($H_{i,t}=0$ if the class does not meet) \\
+$X_{u,t}$ & Number of translation requests student $u$ would like to make on day $t$ \\
+$n_t$ & Number of text strings checked for reading level on day $t$ \\
+$a_t$, $w_{p,s}$, $V_s$ & Number of shared projects on day $t$; writes to shared project $s$; people who have it open \\
+\hline
+\end{tabular}
+\end{center}
+
+\paragraph{Quantities we compute.}
+\begin{center}
+\begin{tabular}{@{}l p{0.78\textwidth}@{}}
+\hline
+Symbol & Meaning \\
+\hline
+$W_t,\ R_t,\ D_t$ & Firestore writes, reads, and deletes on day $t$ \\
+$T_t$ & Translation requests actually made on day $t$ after the cap \\
+$k_t$ & Number of chunks of up to 40 strings on day $t$ \\
+$A,\ d$ & reCAPTCHA assessments per month and active devices \\
+$C_{\text{total}}$ & Total monthly cost \\
+$n_{\text{sim}}$ & Number of simulated months \\
+\hline
+\end{tabular}
+\end{center}
+
+\subsection{From student activity to daily counts}
+
+On day $t$, class $i$ has $N_i$ students who edit for $H_{i,t}$ hours. We assume all students in a class act the same way (see Simplifications). Then the Firestore counts for the day are
+\begin{align*}
+W_t &= \sum_{i=1}^{K} w_h\, N_i\, H_{i,t}, \\
+R_t &= \sum_{i=1}^{K} N_i\, S\,(N_i-1)\, H_{i,t} \;+\; \sum_{s=1}^{a_t} w_{p,s}\,(V_s-1), \\
+D_t &= \sum_{i=1}^{K} 1500\, N_i\, H_{i,t}.
+\end{align*}
+The first part of $R_t$ is the reads in shared galleries, which grows with $N_i^2$. The second part is the reads in projects that are edited together.
+
+For Claude, the cap $q$ limits how many translation requests each student can make in a day, so
+\[
+T_t = \sum_{u=1}^{N_{\text{tot}}} \min\bigl(X_{u,t},\, q\bigr).
+\]
+One translation request costs
+\[
+C_{\text{translate}} = \frac{0.10\, I + 0.50\, O}{10^6}.
+\]
+The reading-level check works on $n_t$ strings in chunks of up to 40, so $k_t=\lceil n_t/40\rceil$, and with the cost sheet's estimates the cost of the day is
+\[
+C_{\text{check},t} =
+\begin{cases}
+0 & n_t = 0, \\
+0.116 + 0.106\,(k_t-1) & n_t > 0.
+\end{cases}
+\]
+(The exact formula for one chunk is $(4U + 5W_c + 0.20R_c + 20(O+T))/10^6$.) The Claude cost of the month is
+\[
+C_{\text{Claude}} = \sum_{t=1}^{\text{days}} \Bigl( T_t\, C_{\text{translate}} + C_{\text{check},t} \Bigr).
+\]
+
+\subsection{Firebase costs}
+
+The free limits for Firestore reset each day, so we find the cost day by day and add:
+\[
+C_{\text{day}}(t) = \frac{0.09\,(W_t-20000)^+ + 0.03\,(R_t-50000)^+ + 0.01\,(D_t-20000)^+}{10^5},
+\qquad
+C_{\text{Firestore}} = \sum_{t=1}^{\text{days}} C_{\text{day}}(t).
+\]
+The other Firebase costs also use the positive part, because each has a free limit:
+\begin{align*}
+C_{\text{storage}} &= 0.15\,(G-1)^+ \text{ per month}, &
+C_{\text{calls}} &= \frac{0.40\,(c-2{,}000{,}000)^+}{10^6} \text{ per month}, \\
+C_{\text{outbound}} &= 0.12\,(e-5)^+ \text{ per month}, &
+C_{\text{hosting}} &= \sum_{t=1}^{\text{days}} 0.15\,(b_t-0.36)^+, \\
+C_{\text{hosting storage}} &= 0.026\,(h-10)^+ \text{ per month}. & &
+\end{align*}
+Together,
+\[
+C_{\text{Firebase}} = C_{\text{Firestore}} + C_{\text{storage}} + C_{\text{calls}} + C_{\text{outbound}} + C_{\text{hosting}} + C_{\text{hosting storage}}.
+\]
+We count function calls as the translation requests, the reading-level chunks, and about 1000 calls per project for the scheduled jobs: $c = \sum_t (T_t + k_t) + 1000\,P$. To avoid counting the \texttt{getWebpage} data twice, $e$ is the outgoing data of the other functions, and \texttt{getWebpage} is counted on its own below.
+
+\subsection{Fixed costs and the remaining items}
+
+The fixed costs are paid every month no matter how many students there are:
+\[
+C_{\text{fixed}} = C_{\text{scheduler}} + C_{\text{secrets}} + C_{\text{backups}} + C_{\text{PITR}} + C_{\text{registry}} + \sum_{t=1}^{\text{days}} C_{\text{build}}(t) + C_{\text{Resend}} + C_{\text{domain}},
+\]
+where
+\begin{align*}
+C_{\text{scheduler}} &= 0.10\,(jP-3)^+, &
+C_{\text{secrets}} &= 0.06\,(s-6)^+ + \frac{0.03\,(a-10000)^+}{10^4}, \\
+C_{\text{backups}} &= 0.03\,(B_d+B_w)\,G = 0.63\,G, &
+C_{\text{PITR}} &= 0.15\,G, \\
+C_{\text{registry}} &= 0.10\,(G_r-0.5)^+, &
+C_{\text{build}}(t) &= 0.003\,(m_t-120)^+.
+\end{align*}
+
+App Check depends on the number of active devices. We assume each student uses one device, so $d=N_{\text{tot}}$ and $A \approx 4.3\,d$ assessments per month:
+\[
+C_{\text{App Check}} =
+\begin{cases}
+0 & A \le 10000, \\
+8 & 10000 < A \le 100000, \\
+8 + \dfrac{A-100000}{1000} & A > 100000.
+\end{cases}
+\]
+The last three items are not driven by the number of students, so we set them as inputs:
+\[
+C_{\text{getWebpage}} \approx 0.12\, e_w, \qquad
+C_{\text{dev}} \approx 3\ell + C_{\text{changelog}} + C_{\text{scripts}}, \qquad
+C_{\text{one-off}} = 0.20\, G_{\text{restore}} + \frac{0.03\, r_m + 0.09\, w_m}{10^5}.
+\]
+
+\subsection{The full model}
+
+Putting everything together, the total cost of one simulated month is
+\[
+C_{\text{total}} = C_{\text{Claude}} + C_{\text{Firebase}} + C_{\text{fixed}} + C_{\text{App Check}} + C_{\text{getWebpage}} + C_{\text{dev}} + C_{\text{one-off}}
+\]
+This is a function of the inputs ($N_{\text{tot}}$, $K$, $N_i$, $q$, and the others) and of the random behavior ($H_{i,t}$, $X_{u,t}$, $n_t$, and the shared-project variables). Running the simulation $n_{\text{sim}}$ times gives $n_{\text{sim}}$ values $C_{\text{total}}^{(1)},\dots,C_{\text{total}}^{(n_{\text{sim}})}$. We report their average and a 95\% confidence interval for it. To answer our question about the cap, note that a larger $q$ can only allow more translation requests, so the cost never goes down as $q$ goes up. This means we can find the largest $q \in [q_{\min}, q_{\max}]$ with average cost at most $B$ by trying values of $q$ (for example by bisection).
 
 
 \end{document}
